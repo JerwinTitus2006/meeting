@@ -1,7 +1,7 @@
 """
 AI Processor – extracts pain points, sentiment, action items and
 generates solutions from meeting transcripts.
-Uses spaCy + HuggingFace transformers (local models, no external API).
+Uses OpenAI GPT (when available) or spaCy + HuggingFace transformers (local models).
 """
 import logging
 import re
@@ -15,6 +15,7 @@ from database.models import (
     Meeting, Transcript, PainPoint, ActionItem,
     SentimentAnalysis, Solution,
 )
+from services.openai_service import openai_service
 
 logger = logging.getLogger("ai-meet.ai")
 
@@ -101,10 +102,21 @@ class AIProcessor:
         full_text = " ".join(t.text for t in transcripts)
         logger.info("📄 Processing %d transcripts (%d chars)", len(transcripts), len(full_text))
 
-        pain_points = await self._extract_pain_points(full_text, meeting_id, transcripts, db)
-        sentiment = await self._analyze_sentiment(full_text, meeting_id, db)
-        action_items = await self._extract_action_items(full_text, meeting_id, db)
+        # Try OpenAI-powered analysis first if available
+        if openai_service.enabled and len(full_text) > 50:
+            logger.info("🤖 Using OpenAI GPT for enhanced analysis")
+            analysis = await openai_service.analyze_transcript(full_text)
+            pain_points = await self._save_openai_pain_points(analysis, meeting_id, transcripts, db)
+            action_items = await self._save_openai_action_items(analysis, meeting_id, db)
+            sentiment = await self._save_openai_sentiment(analysis, meeting_id, db)
+        else:
+            # Fallback to keyword-based analysis
+            logger.info("📝 Using keyword-based analysis")
+            pain_points = await self._extract_pain_points(full_text, meeting_id, transcripts, db)
+            sentiment = await self._analyze_sentiment(full_text, meeting_id, db)
+            action_items = await self._extract_action_items(full_text, meeting_id, db)
 
+        # Generate solutions for all pain points
         for pp in pain_points:
             await self._generate_solution(pp, db)
 
@@ -112,16 +124,77 @@ class AIProcessor:
 
         logger.info(
             "✅ Done: %d pain points, %d actions, sentiment=%s",
-            len(pain_points), len(action_items), sentiment["overall_sentiment"],
+            len(pain_points), len(action_items), sentiment.get("overall_sentiment", "neutral"),
         )
         return {
             "pain_points_count": len(pain_points),
             "action_items_count": len(action_items),
-            "sentiment": sentiment["overall_sentiment"],
-            "sentiment_score": sentiment["sentiment_score"],
+            "sentiment": sentiment.get("overall_sentiment", "neutral"),
+            "sentiment_score": sentiment.get("sentiment_score", 50.0),
         }
 
-    # ----- pain points ------------------------------------------------
+    # ----- OpenAI-powered extraction ----------------------------------
+    async def _save_openai_pain_points(
+        self, analysis: Dict, meeting_id: str,
+        transcripts: List[Transcript], db: AsyncSession,
+    ) -> List[PainPoint]:
+        """Save pain points from OpenAI analysis"""
+        pain_points: List[PainPoint] = []
+        for pp_data in analysis.get("pain_points", []):
+            pp = PainPoint(
+                meeting_id=meeting_id,
+                transcript_id=None,  # Could match to transcript if needed
+                issue_text=pp_data.get("issue", ""),
+                category=pp_data.get("category", "other"),
+                severity=pp_data.get("severity", "medium"),
+                context=pp_data.get("context", pp_data.get("issue", "")),
+                status="open",
+            )
+            db.add(pp)
+            pain_points.append(pp)
+            logger.info("🔍 Pain [%s/%s]: %s", pp.category, pp.severity, pp.issue_text[:60])
+        return pain_points
+
+    async def _save_openai_action_items(
+        self, analysis: Dict, meeting_id: str, db: AsyncSession,
+    ) -> List[ActionItem]:
+        """Save action items from OpenAI analysis"""
+        items: List[ActionItem] = []
+        for ai_data in analysis.get("action_items", []):
+            ai = ActionItem(
+                meeting_id=meeting_id,
+                task_description=ai_data.get("task", ""),
+                assigned_to=ai_data.get("assignee", "Unassigned"),
+                priority=ai_data.get("priority", "medium"),
+                status="pending",
+                due_date=ai_data.get("deadline"),
+            )
+            db.add(ai)
+            items.append(ai)
+            logger.info("✅ Action [%s]: %s → %s", ai.priority, ai.task_description[:60], ai.assigned_to)
+        return items
+
+    async def _save_openai_sentiment(
+        self, analysis: Dict, meeting_id: str, db: AsyncSession,
+    ) -> Dict:
+        """Save sentiment analysis from OpenAI"""
+        sentiment = analysis.get("sentiment", {})
+        sa = SentimentAnalysis(
+            meeting_id=meeting_id,
+            overall_sentiment=sentiment.get("overall", "neutral"),
+            sentiment_score=float(sentiment.get("score", 50.0)),
+            distributor_satisfaction=float(sentiment.get("score", 50.0)),
+            key_emotions=sentiment.get("key_emotions", []),
+            confidence=0.9,
+        )
+        db.add(sa)
+        logger.info("😊 Sentiment: %s (score: %s)", sa.overall_sentiment, sa.sentiment_score)
+        return {
+            "overall_sentiment": sa.overall_sentiment,
+            "sentiment_score": sa.sentiment_score,
+        }
+
+    # ----- pain points (keyword-based fallback) ----------------------
     async def _extract_pain_points(
         self, text: str, meeting_id: str,
         transcripts: List[Transcript], db: AsyncSession,
@@ -355,6 +428,32 @@ class AIProcessor:
     }
 
     async def _generate_solution(self, pain_point: PainPoint, db: AsyncSession):
+        """Generate solutions - use OpenAI if available, otherwise use predefined solutions"""
+        # Try OpenAI first
+        if openai_service.enabled:
+            try:
+                steps = await openai_service.generate_solutions(
+                    pain_point.issue_text,
+                    pain_point.category or "other",
+                    pain_point.severity or "medium"
+                )
+                if steps:
+                    sol = Solution(
+                        pain_point_id=pain_point.id,
+                        solution_text=steps[0],
+                        implementation_steps=steps,
+                        priority_rank=1,
+                        feasibility_score=0.85,
+                        estimated_impact="high" if pain_point.severity in ("critical", "high") else "medium",
+                        generated_by="openai-gpt",
+                    )
+                    db.add(sol)
+                    logger.info("💡 Solution (GPT): %s…", steps[0][:50])
+                    return
+            except Exception as exc:
+                logger.error("Error generating GPT solution: %s", exc)
+        
+        # Fallback to predefined solutions
         cat = pain_point.category or "other"
         sev = pain_point.severity or "medium"
         cat_map = self.SOLUTIONS_MAP.get(cat, self.SOLUTIONS_MAP["other"])

@@ -331,6 +331,13 @@ export default function MeetingRoom({
         setCurrentMeetingId(meetingId);
       }
       setTimeout(() => startRecordingNow(), 2000);
+      // Auto-enable captions for transcription
+      setTimeout(() => {
+        if (!captionsOnRef.current) {
+          console.log('🎤 Auto-enabling captions for transcription');
+          toggleCaptions();
+        }
+      }, 3000);
     }
 
     socket.on('room_joined', async ({ participants: existing, chatHistory, meetingId: mid, isHost: hostFlag, hostSid }: any) => {
@@ -364,6 +371,14 @@ export default function MeetingRoom({
 
       // ── Auto-start recording after a short delay ──
       setTimeout(() => startRecordingNow(), 2000);
+      
+      // ── Auto-enable captions for transcription ──
+      setTimeout(() => {
+        if (!captionsOnRef.current) {
+          console.log('🎤 Auto-enabling captions for transcription');
+          toggleCaptions();
+        }
+      }, 3000);
     });
 
     socket.on('participant_joined', ({ sid, name, audioEnabled: a, videoEnabled: v }: any) => {
@@ -754,6 +769,7 @@ export default function MeetingRoom({
         </div>
         <div className="meeting-clock">
           {recording && <span className="recording-indicator">🔴 REC</span>}
+          {captionsOn && <span className="recording-indicator" style={{ background: '#1a73e8', marginLeft: '8px' }}>🎤 TRANSCRIBING</span>}
           {fmt(elapsed)}&nbsp;&middot;&nbsp;{total} participant{total !== 1 ? 's' : ''}
           {amHost && waitingCount > 0 && (
             <span className="waiting-badge" onClick={() => setSidePanel(sidePanel === 'waiting' ? 'none' : 'waiting')}>
