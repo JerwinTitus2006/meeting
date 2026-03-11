@@ -17,7 +17,10 @@ aiosqlite==0.19.0
 # HTTP client (Sarvam AI calls)
 httpx==0.26.0
 
-# OpenAI for advanced AI analysis
+# Google Gemini AI (primary AI analysis)
+google-generativeai>=0.3.0
+
+# OpenAI for advanced AI analysis (alternative)
 openai==1.12.0
 
 # MongoDB (async driver + GridFS for recordings)

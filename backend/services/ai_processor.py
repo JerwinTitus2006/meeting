@@ -15,7 +15,7 @@ from database.models import (
     Meeting, Transcript, PainPoint, ActionItem,
     SentimentAnalysis, Solution,
 )
-from services.openai_service import openai_service
+from services.gemini_service import gemini_service
 
 logger = logging.getLogger("ai-meet.ai")
 
@@ -102,10 +102,10 @@ class AIProcessor:
         full_text = " ".join(t.text for t in transcripts)
         logger.info("📄 Processing %d transcripts (%d chars)", len(transcripts), len(full_text))
 
-        # Try OpenAI-powered analysis first if available
-        if openai_service.enabled and len(full_text) > 50:
-            logger.info("🤖 Using OpenAI GPT for enhanced analysis")
-            analysis = await openai_service.analyze_transcript(full_text)
+        # Try Gemini-powered analysis first if available
+        if gemini_service.enabled and len(full_text) > 50:
+            logger.info("🤖 Using Google Gemini for enhanced analysis")
+            analysis = await gemini_service.analyze_transcript(full_text)
             pain_points = await self._save_openai_pain_points(analysis, meeting_id, transcripts, db)
             action_items = await self._save_openai_action_items(analysis, meeting_id, db)
             sentiment = await self._save_openai_sentiment(analysis, meeting_id, db)
@@ -428,11 +428,11 @@ class AIProcessor:
     }
 
     async def _generate_solution(self, pain_point: PainPoint, db: AsyncSession):
-        """Generate solutions - use OpenAI if available, otherwise use predefined solutions"""
-        # Try OpenAI first
-        if openai_service.enabled:
+        """Generate solutions - use Gemini if available, otherwise use predefined solutions"""
+        # Try Gemini first
+        if gemini_service.enabled:
             try:
-                steps = await openai_service.generate_solutions(
+                steps = await gemini_service.generate_solutions(
                     pain_point.issue_text,
                     pain_point.category or "other",
                     pain_point.severity or "medium"
@@ -445,13 +445,13 @@ class AIProcessor:
                         priority_rank=1,
                         feasibility_score=0.85,
                         estimated_impact="high" if pain_point.severity in ("critical", "high") else "medium",
-                        generated_by="openai-gpt",
+                        generated_by="gemini-ai",
                     )
                     db.add(sol)
-                    logger.info("💡 Solution (GPT): %s…", steps[0][:50])
+                    logger.info("💡 Solution (Gemini): %s…", steps[0][:50])
                     return
             except Exception as exc:
-                logger.error("Error generating GPT solution: %s", exc)
+                logger.error("Error generating Gemini solution: %s", exc)
         
         # Fallback to predefined solutions
         cat = pain_point.category or "other"
